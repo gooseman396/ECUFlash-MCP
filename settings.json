@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "evo_tuner": {
+      "command": "python",
+      "args": ["C:/Users/Joey/Desktop/AIEvoTunerMCP/evo_tuner_mcp.py"],
+      "env": {
+        "EVO_ROM_PATH": "C:/Users/Joey/Desktop/AIEvoTunerMCP/Roms",
+        "EVO_XML_PATHS": "C:/Program Files (x86)/OpenECU/EcuFlash/rommetadata/mitsubishi/evo",
+        "EVO_OUTPUT_ROM_PATH": "C:/Users/Joey/Desktop/AIEvoTunerMCP/Roms/modified",
+        "EVO_TABLE_ALLOWLIST": "",
+        "EVO_REQUIRE_BACKUP": "true"
+      }
+    }
+  }
+}

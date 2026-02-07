@@ -1,0 +1,33 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Test/coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Type checker/linter caches
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Editor/OS noise
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Project-specific outputs
+Roms/modified/
