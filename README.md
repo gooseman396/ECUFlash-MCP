@@ -40,12 +40,17 @@ If you are launching via an MCP client, point it at this server entry point and 
 - Launch analysis: `analyze_launch_log` -> `extract_launch_window` -> `map_log_to_table`.
 - Safe write preview: `preview_write_table_for_rom` or `preview_write_cell_for_rom` before `write_table_for_rom`.
 - Cache refresh after XML edits: `refresh_xml_cache`.
+- Direct boost blobs (RAX3): `read_blob_for_rom` with explicit length/data_type.
+- Blob bitfields: `read_blob_bits_for_rom` for ECU options and mode flags.
+- Blob decoding: `decode_blob_table_for_rom` for known bloblist scalings.
+- Definition audit: `diagnose_rom_definitions` for missing rows/axes/scalings.
 
 ### AI-Friendly Helpers
 - `get_current_context` provides paths, allowlist profile, and active settings.
 - `list_common_tables_for_rom` reduces table hunting by profile.
 - `find_table` returns axis metadata for exact matches.
 - `preview_write_table_for_rom` reports deltas without writing.
+- Axis inference uses a registry for common RPM/Load/Throttle axis addresses.
 
 ## Risks and Disclaimer
 - Use at your own risk. Calibration changes can damage engines, drivetrains, or emissions systems if used incorrectly.

@@ -61,6 +61,7 @@ COMMON_TABLE_QUERIES: dict[str, list[str]] = {
         "WGDC",
         "Wastegate",
         "Boost Cut",
+        "RAX Direct Boost Baro Comp",
     ],
     "fuel": [
         "High Octane Fuel Map",
@@ -89,9 +90,38 @@ TABLE_SIZE_OVERRIDES: dict[str, tuple[int, int]] = {
 TABLE_SIZE_PATTERNS: list[tuple[re.Pattern[str], tuple[int, int]]] = [
     (re.compile(r"alternate #\d+ high octane timing map", re.IGNORECASE), (23, 22)),
     (re.compile(r"alternate #\d+ high octane fuel map", re.IGNORECASE), (16, 21)),
+    (re.compile(r"boost target engine load", re.IGNORECASE), (9, 18)),
+    (re.compile(r"boost target", re.IGNORECASE), (9, 18)),
+    (re.compile(r"wgdc map", re.IGNORECASE), (9, 18)),
     (re.compile(r"timing map", re.IGNORECASE), (23, 22)),
     (re.compile(r"fuel map", re.IGNORECASE), (16, 21)),
 ]
+
+AXIS_ADDRESS_REGISTRY: dict[int, dict[str, object]] = {
+    0x6286A: {"elements": 9, "scaling": "Throttle_Main - Stored Minimum Throttle %"},
+    0x627E8: {"elements": 18, "scaling": "RPM"},
+    0x6112C: {"elements": 21, "scaling": "Load"},
+    0x61106: {"elements": 16, "scaling": "RPM"},
+    0x611A6: {"elements": 22, "scaling": "Load"},
+    0x61172: {"elements": 23, "scaling": "RPM"},
+}
+
+BLOB_DECODER_REGISTRY: dict[str, dict[str, object]] = {
+    "MapSwitchingMaster": {
+        "length": 1,
+        "data_type": "uint8",
+        "enum": {0: "OFF", 1: "Alt Map", 2: "MethSafe", 3: "Flex"},
+    },
+    "MethSafeMapMaster": {
+        "length": 1,
+        "data_type": "uint8",
+        "enum": {0: "OFF", 1: "5V ADC", 2: "Resistor ADC"},
+    },
+    "AlternateMapMaxCount": {"length": 1, "data_type": "uint8"},
+    "FlexFuelInput": {"length": 1, "data_type": "uint8"},
+    "Crossover_RPMSpeed_Ratio_5MT": {"length": 2, "data_type": "uint16"},
+    "blobbits": {"length": 2, "data_type": "bits"},
+}
 
 
 @dataclass
@@ -246,13 +276,24 @@ def _parse_table_defs_for_xml(xml_path: str) -> list[TableDef]:
                 if tag in ("xaxis", "yaxis", "axis", "table") or axis_type in ("x axis", "y axis"):
                     elements = _find_attr_int(child, ["elements", "size", "count", "cols", "rows"])
                     if elements is None:
+                        axis_addr = _find_attr_int(child, ["address", "storageaddress", "offset", "start"])
+                        elements, _ = _axis_elements_from_address(axis_addr)
+                    if elements is None:
                         continue
                     if cols is None and (tag == "xaxis" or axis_type == "x axis"):
                         cols = elements
                     elif rows is None and (tag == "yaxis" or axis_type == "y axis"):
                         rows = elements
+        if rows is None and cols is None:
+            axis_elements, axis_scaling = _axis_elements_from_address(address)
+            if axis_elements is not None:
+                cols = axis_elements
         data_type = _find_attr_str(elem, ["type", "datatype", "storage", "storagetype"])
         scaling = _extract_scaling(elem)
+        if scaling is None and rows is None and cols is None:
+            _, axis_scaling = _axis_elements_from_address(address)
+            if axis_scaling:
+                scaling = axis_scaling
         table_defs.append(
             TableDef(
                 name=name.strip(),
@@ -543,6 +584,15 @@ def _infer_table_size(table_name: str | None) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _axis_elements_from_address(address: int | None) -> tuple[int | None, str | None]:
+    if address is None:
+        return None, None
+    entry = AXIS_ADDRESS_REGISTRY.get(address)
+    if not entry:
+        return None, None
+    return entry.get("elements"), entry.get("scaling")
+
+
 def _safe_float(value: str | None) -> float | None:
     if value is None:
         return None
@@ -719,6 +769,7 @@ def _read_table_from_def(
     endian: str,
     apply_scaling: bool,
 ) -> dict:
+    assumed_scalar = False
     try:
         rows, cols, data_type, endian, resolved_scaling = _resolve_table_meta(
             table_def, rows, cols, data_type, endian
@@ -731,6 +782,10 @@ def _read_table_from_def(
             "rows": rows or table_def.rows,
             "cols": cols or table_def.cols,
         }
+
+    if (table_def.data_type or "").lower() in ("1d", "2d") and table_def.rows is None and table_def.cols is None:
+        if rows == 1 and cols == 1:
+            assumed_scalar = True
 
     fmt, size = _dtype_format(data_type, endian)
     count = rows * cols
@@ -772,7 +827,7 @@ def _read_table_from_def(
 
     scaling_meta = _get_scaling_meta(table_def.scaling)
 
-    return {
+    result = {
         "table_name": table_def.name,
         "address": f"0x{table_def.address:X}",
         "rows": rows,
@@ -790,6 +845,9 @@ def _read_table_from_def(
         "source_xml": table_def.source_xml,
         "data": table,
     }
+    if assumed_scalar:
+        result["warning"] = "Assumed scalar size 1x1 due to missing dimensions."
+    return result
 
 
 def _normalize_table_result(result: dict) -> dict:
@@ -829,6 +887,20 @@ def _read_scalar_from_def(
         "raw_value": raw["data"][0][0],
         "value": scaled["data"][0][0],
     }
+
+
+def _read_raw_bytes(rom_filename: str, address: int, length: int) -> dict:
+    if length <= 0:
+        return {"error": "length must be > 0."}
+    rom_path = os.path.join(ROM_PATH, rom_filename)
+    if not os.path.isfile(rom_path):
+        return {"error": f"ROM file not found: {rom_path}"}
+    with open(rom_path, "rb") as rom_file:
+        rom_file.seek(address)
+        data = rom_file.read(length)
+    if len(data) != length:
+        return {"error": "ROM read size mismatch", "expected": length, "got": len(data)}
+    return {"data": data}
 
 
 def _write_table_from_def(
@@ -1370,6 +1442,11 @@ def read_table_with_axes_for_rom(
         if tag not in ("table", "xaxis", "yaxis", "axis"):
             continue
         elements = _find_attr_int(child, ["elements", "size", "count", "cols", "rows"])
+        axis_addr = _find_attr_int(child, ["address", "storageaddress", "offset", "start"])
+        if elements is None:
+            elements, axis_scaling = _axis_elements_from_address(axis_addr)
+            if axis_scaling and not child.attrib.get("scaling"):
+                child.attrib["scaling"] = axis_scaling
         if elements is None:
             continue
         if "x axis" in axis_type or tag == "xaxis":
@@ -1416,6 +1493,259 @@ def read_scalar_for_rom(
         return {"error": f"No tables matched '{table_name}'."}
 
     return _read_scalar_from_def(rom_filename, matches[0], endian)
+
+
+@mcp.tool()
+def read_blob_for_rom(
+    rom_filename: str,
+    table_name: str,
+    length: int,
+    data_type: str | None = "uint16",
+    endian: str = "big",
+) -> dict:
+    """Reads raw blob data for tables like RAX Direct Boost comp entries."""
+    error = _validate_table_name(table_name)
+    if error:
+        return {"error": error}
+    if length <= 0:
+        return {"error": "length must be > 0."}
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    table_defs: list[TableDef] = []
+    for xml_path in chain:
+        table_defs.extend(_parse_table_defs_for_xml(xml_path))
+
+    matches = _match_tables_in_defs(table_name, table_defs)
+    if not matches:
+        return {"error": f"No tables matched '{table_name}'."}
+
+    table_def = matches[0]
+    raw = _read_raw_bytes(rom_filename, table_def.address, length)
+    if "data" not in raw:
+        return raw
+    data = raw["data"]
+
+    values = None
+    if data_type:
+        fmt, size = _dtype_format(data_type, endian)
+        if len(data) % size != 0:
+            return {
+                "error": "length is not aligned to data_type size",
+                "length": len(data),
+                "data_type": data_type,
+                "size": size,
+            }
+        count = len(data) // size
+        values = [struct.unpack(fmt, data[i * size : (i + 1) * size])[0] for i in range(count)]
+
+    return {
+        "table_name": table_def.name,
+        "address": f"0x{table_def.address:X}",
+        "source_xml": table_def.source_xml,
+        "length": len(data),
+        "hex": data.hex(),
+        "data_type": data_type,
+        "endian": endian,
+        "values": values,
+    }
+
+
+@mcp.tool()
+def read_blob_bits_for_rom(
+    rom_filename: str,
+    table_name: str,
+    length: int,
+) -> dict:
+    """Reads raw bytes and returns set bit positions for blob-bit tables."""
+    error = _validate_table_name(table_name)
+    if error:
+        return {"error": error}
+    if length <= 0:
+        return {"error": "length must be > 0."}
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    table_defs: list[TableDef] = []
+    for xml_path in chain:
+        table_defs.extend(_parse_table_defs_for_xml(xml_path))
+
+    matches = _match_tables_in_defs(table_name, table_defs)
+    if not matches:
+        return {"error": f"No tables matched '{table_name}'."}
+
+    table_def = matches[0]
+    raw = _read_raw_bytes(rom_filename, table_def.address, length)
+    if "data" not in raw:
+        return raw
+    data = raw["data"]
+    set_bits = []
+    for byte_index, value in enumerate(data):
+        for bit in range(8):
+            if value & (1 << bit):
+                set_bits.append(byte_index * 8 + bit)
+
+    return {
+        "table_name": table_def.name,
+        "address": f"0x{table_def.address:X}",
+        "source_xml": table_def.source_xml,
+        "length": len(data),
+        "hex": data.hex(),
+        "set_bits": set_bits,
+    }
+
+
+@mcp.tool()
+def decode_blob_table_for_rom(
+    rom_filename: str,
+    table_name: str,
+    length: int | None = None,
+) -> dict:
+    """Decodes known blob tables into enums/bitfields when possible."""
+    error = _validate_table_name(table_name)
+    if error:
+        return {"error": error}
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    table_defs: list[TableDef] = []
+    for xml_path in chain:
+        table_defs.extend(_parse_table_defs_for_xml(xml_path))
+
+    matches = _match_tables_in_defs(table_name, table_defs)
+    if not matches:
+        return {"error": f"No tables matched '{table_name}'."}
+
+    table_def = matches[0]
+    decoder = BLOB_DECODER_REGISTRY.get(table_def.scaling or "")
+    if decoder is None:
+        return {
+            "error": "No decoder registered for this blob scaling.",
+            "table_name": table_def.name,
+            "scaling": table_def.scaling,
+        }
+
+    resolved_length = length or int(decoder.get("length", 0))
+    if resolved_length <= 0:
+        return {
+            "error": "Decoder length not provided.",
+            "table_name": table_def.name,
+            "scaling": table_def.scaling,
+        }
+
+    if decoder.get("data_type") == "bits":
+        return read_blob_bits_for_rom(rom_filename, table_def.name, resolved_length)
+
+    data_type = decoder.get("data_type")
+    endian = decoder.get("endian", "big")
+    raw = read_blob_for_rom(
+        rom_filename,
+        table_def.name,
+        length=resolved_length,
+        data_type=data_type,
+        endian=endian,
+    )
+    if "values" not in raw:
+        return raw
+
+    decoded = None
+    enum_map = decoder.get("enum")
+    if enum_map and raw.get("values"):
+        decoded = enum_map.get(raw["values"][0])
+
+    return {
+        "table_name": table_def.name,
+        "address": raw.get("address"),
+        "source_xml": table_def.source_xml,
+        "length": raw.get("length"),
+        "data_type": raw.get("data_type"),
+        "endian": raw.get("endian"),
+        "values": raw.get("values"),
+        "decoded": decoded,
+    }
+
+
+@mcp.tool()
+def diagnose_rom_definitions(rom_filename: str, sample_limit: int = 10) -> dict:
+    """Reports definition gaps for the ROM XML chain."""
+    if sample_limit <= 0:
+        return {"error": "sample_limit must be > 0."}
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    missing_dims = []
+    missing_axes = []
+    blob_tables = []
+    scaling_gaps = []
+    scalings = _parse_scaling_defs()
+
+    for xml_path in chain:
+        root = _load_xml_root(xml_path)
+        if root is None:
+            continue
+        for elem in root.iter():
+            name = _find_attr_str(elem, ["name", "id", "description"])
+            address = _find_attr_int(elem, ["address", "storageaddress", "offset", "start"])
+            if not name or address is None:
+                continue
+            data_type = _find_attr_str(elem, ["type", "datatype", "storage", "storagetype"]) or ""
+            scaling = _extract_scaling(elem)
+            rows = _find_attr_int(elem, ["rows", "row", "ysize", "y"])
+            cols = _find_attr_int(elem, ["columns", "cols", "xsize", "x"])
+
+            if rows is None or cols is None:
+                inferred = _infer_table_size(name)
+                if inferred == (None, None):
+                    axis_has_elements = False
+                    for child in elem:
+                        tag = child.tag.lower()
+                        axis_type = (child.attrib.get("type") or "").lower()
+                        if tag in ("xaxis", "yaxis", "axis", "table") or axis_type in ("x axis", "y axis"):
+                            elements = _find_attr_int(child, ["elements", "size", "count", "cols", "rows"])
+                            if elements is None:
+                                axis_addr = _find_attr_int(child, ["address", "storageaddress", "offset", "start"])
+                                elements, _ = _axis_elements_from_address(axis_addr)
+                            if elements is not None:
+                                axis_has_elements = True
+                                break
+                    if not axis_has_elements:
+                        missing_dims.append((name, xml_path, data_type, scaling))
+                    else:
+                        missing_axes.append((name, xml_path, data_type, scaling))
+
+            if scaling in scalings and scalings[scaling].get("storagetype") == "bloblist":
+                blob_tables.append((name, xml_path, data_type, scaling))
+
+            if scaling:
+                sdef = scalings.get(scaling, {})
+                toexpr = sdef.get("toexpr") or sdef.get("formula")
+                if toexpr is None and "x" not in scaling:
+                    scaling_gaps.append((name, xml_path, scaling))
+
+    return {
+        "rom_filename": rom_filename,
+        "chain": chain,
+        "missing_dims": {
+            "count": len(missing_dims),
+            "samples": missing_dims[:sample_limit],
+        },
+        "missing_axes": {
+            "count": len(missing_axes),
+            "samples": missing_axes[:sample_limit],
+        },
+        "blob_tables": {
+            "count": len(blob_tables),
+            "samples": blob_tables[:sample_limit],
+        },
+        "scaling_gaps": {
+            "count": len(scaling_gaps),
+            "samples": scaling_gaps[:sample_limit],
+        },
+    }
 
 
 @mcp.tool()

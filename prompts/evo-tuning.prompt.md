@@ -28,6 +28,8 @@ Use MCP tools from the `evo_tuner` server when helpful:
 - ROM: `identify_rom`, `get_rom_info`, `get_header`, `list_tables`, `read_table`, `write_table`, `write_cell`
 - Logs: `list_logs`, `read_log`
 - ROM (chain-aware): `get_definition_chain`, `list_tables_for_rom`, `search_tables_for_rom`, `read_table_for_rom`, `read_table_with_axes_for_rom`, `read_scalar_for_rom`, `write_table_for_rom`, `write_cell_for_rom`, `write_scalar_for_rom`, `compare_roms`
+- ROM (direct boost): `read_blob_for_rom`, `read_blob_bits_for_rom`, `decode_blob_table_for_rom`
+- ROM (diagnostics): `diagnose_rom_definitions`
 - ROM (control): `get_allowlist_profiles`, `set_allowlist_profile`
 - Logs (analysis): `analyze_launch_log`, `compare_launch_logs`, `extract_launch_window`, `map_log_to_table`
 
