@@ -31,7 +31,11 @@ Use MCP tools from the `evo_tuner` server when helpful:
 - ROM (direct boost): `read_blob_for_rom`, `read_blob_bits_for_rom`, `decode_blob_table_for_rom`
 - ROM (diagnostics): `diagnose_rom_definitions`
 - ROM (control): `get_allowlist_profiles`, `set_allowlist_profile`
+- ROM (boost sanity): `check_boost_control_consistency`, `compare_table_between_roms`
 - Logs (analysis): `analyze_launch_log`, `compare_launch_logs`, `extract_launch_window`, `map_log_to_table`
+- Logs (health): `check_log_signals`, `analyze_launch_health`, `estimate_low_rpm_torque_risk`
+- Usecases: `list_tuning_usecases`, `get_tuning_usecase`, `list_usecase_tables_for_rom`
+- Guardrails: `get_guardrail_profiles`
 
 Process:
 1) Clarify the goal and confirm the ROM filename.
@@ -42,4 +46,31 @@ Process:
 
 Safety:
 - Avoid changes that exceed a conservative `max_delta` unless explicitly approved.
+- Max-delta guardrails are opt-in; enable `max_delta`, `use_default_max_delta`, or set `EVO_DEFAULT_USE_MAX_DELTA=true`.
+- Defaults for axes, table sizes, and queries can be overridden via `EVO_CONFIG_PATH`.
 - If data or definitions are missing, ask for the missing inputs.
+
+Config (optional overrides):
+Example `mcp_config.json`:
+```
+{
+	"axis_address_registry": {
+		"0x627E8": {"elements": 18, "scaling": "RPM"}
+	},
+	"table_size_overrides": {
+		"boost target": [9, 18]
+	},
+	"table_size_patterns": [
+		{"pattern": "boost target", "size": [9, 18]}
+	],
+	"common_table_queries": {
+		"boost": ["Boost Target", "WGDC"]
+	},
+	"allowlist_profiles": {
+		"boost": ["*boost*", "*wgdc*"]
+	},
+	"guardrail_profiles": {
+		"street": {"max_delta": 2.0, "low_rpm_boost_cap": 12.0}
+	}
+}
+```

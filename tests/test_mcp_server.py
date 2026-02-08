@@ -180,6 +180,36 @@ def test_launch_log_tools(tmp_path, monkeypatch):
     assert extracted["rows_written"] == 2
 
 
+def test_usecase_tools_and_log_signal_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(etm, "LOG_PATH", str(tmp_path))
+
+    usecases = etm.list_tuning_usecases()
+    assert any(item["name"] == "boost_targeting" for item in usecases)
+
+    usecase = etm.get_tuning_usecase("BOOST_TARGETING")
+    assert usecase["category"] == "boost"
+
+    log_path = tmp_path / "signals.csv"
+    _write_log(
+        log_path,
+        [
+            {
+                "LogEntrySeconds": "1.0",
+                "RPM": "3000",
+                "TPS": "80",
+                "Speed": "2",
+                "Boost": "10",
+                "TimingAdv": "5",
+                "KnockSum": "0",
+                "Load": "150",
+            }
+        ],
+    )
+
+    signal_check = etm.check_log_signals(log_path.name, "launch")
+    assert signal_check["missing_columns"] == ["afr"]
+
+
 def test_rom_compare_axis_and_mapping(tmp_path, monkeypatch):
     base_xml = tmp_path / "base2.xml"
     top_xml = tmp_path / "top2.xml"
@@ -260,3 +290,90 @@ def test_rom_compare_axis_and_mapping(tmp_path, monkeypatch):
         rpm_max=2500,
     )
     assert mapping["total_cells"] >= 1
+
+
+def test_launch_health_and_torque_risk(tmp_path, monkeypatch):
+    base_xml = tmp_path / "base3.xml"
+    top_xml = tmp_path / "top3.xml"
+    rom = tmp_path / "launch.bin"
+
+    scalings = [
+        "  <scaling name=\"RPMStatLimit\" units=\"RPM\" toexpr=\"x\" frexpr=\"x\" storagetype=\"uint16\" endian=\"big\"/>",
+        "  <scaling name=\"SpeedLimit\" units=\"km/h\" toexpr=\"x\" frexpr=\"x\" storagetype=\"uint16\" endian=\"big\"/>",
+        "  <scaling name=\"Percent\" units=\"%\" toexpr=\"x\" frexpr=\"x\" storagetype=\"uint16\" endian=\"big\"/>",
+        "  <scaling name=\"Timing\" units=\"deg\" toexpr=\"x\" frexpr=\"x\" storagetype=\"uint16\" endian=\"big\"/>",
+        "  <scaling name=\"AFR\" units=\"AFR\" toexpr=\"x\" frexpr=\"x\" storagetype=\"uint16\" endian=\"big\"/>",
+    ]
+    tables = [
+        "  <table name=\"Maximum Speed permitted for Launch Maps\" address=\"0x40\" type=\"1D\" scaling=\"SpeedLimit\"/>",
+        "  <table name=\"Minimum TPS required for NLTS or Launch Maps\" address=\"0x42\" type=\"1D\" scaling=\"Percent\"/>",
+        "  <table name=\"Stationary Rev Limiter\" address=\"0x44\" type=\"1D\" scaling=\"RPMStatLimit\"/>",
+        "  <table name=\"Launch High Octane Timing Map\" address=\"0x100\" type=\"3D\" rows=\"2\" columns=\"2\" scaling=\"Timing\"/>",
+        "  <table name=\"Launch High Octane Fuel Map\" address=\"0x120\" type=\"3D\" rows=\"2\" columns=\"2\" scaling=\"AFR\"/>",
+    ]
+    _write_xml(base_xml, "base3", tables=tables, scalings=scalings)
+    _write_xml(top_xml, "top3", include="base3", internalidhex="55570306", internalidaddress=0x5002A)
+
+    _make_rom(rom, "55570306", 0x5002A, {0x40: 3, 0x42: 70, 0x44: 5000})
+    _write_values(rom, {0x100: [0, 1, 2, 3], 0x120: [12, 12, 11, 11]})
+
+    monkeypatch.setattr(etm, "XML_PATHS", [str(tmp_path)])
+    monkeypatch.setattr(etm, "ROM_PATH", str(tmp_path))
+    monkeypatch.setattr(etm, "LOG_PATH", str(tmp_path))
+
+    log_path = tmp_path / "launch.csv"
+    _write_log(
+        log_path,
+        [
+            {
+                "LogEntrySeconds": "1.0",
+                "RPM": "3000",
+                "TPS": "80",
+                "Speed": "2",
+                "Boost": "10",
+                "AFR": "12.0",
+                "TimingAdv": "-10",
+                "KnockSum": "1",
+                "Load": "150",
+            }
+        ],
+    )
+
+    health = etm.analyze_launch_health(rom.name, log_path.name)
+    assert health["launch_summary"]["sample_count"] == 1
+    assert any(flag["issue"] == "timing_below_floor" for flag in health["flags"])
+
+    torque_risk = etm.estimate_low_rpm_torque_risk(log_path.name, boost_threshold=5.0)
+    assert torque_risk["risk_samples"] >= 1
+
+
+def test_boost_consistency_and_table_compare(tmp_path, monkeypatch):
+    base_xml = tmp_path / "base4.xml"
+    top_xml = tmp_path / "top4.xml"
+    rom_a = tmp_path / "boost_a.bin"
+    rom_b = tmp_path / "boost_b.bin"
+
+    scalings = [
+        "  <scaling name=\"Boost\" units=\"psi\" toexpr=\"x\" frexpr=\"x\" storagetype=\"uint16\" endian=\"big\"/>",
+    ]
+    tables = [
+        "  <table name=\"Boost Target (High)\" address=\"0x200\" type=\"3D\" rows=\"2\" columns=\"2\" scaling=\"Boost\"/>",
+        "  <table name=\"WGDC Map\" address=\"0x210\" type=\"3D\" rows=\"2\" columns=\"2\" scaling=\"Boost\"/>",
+    ]
+    _write_xml(base_xml, "base4", tables=tables, scalings=scalings)
+    _write_xml(top_xml, "top4", include="base4", internalidhex="55570306", internalidaddress=0x5002A)
+
+    _make_rom(rom_a, "55570306", 0x5002A, {})
+    rom_b.write_bytes(rom_a.read_bytes())
+    _write_values(rom_a, {0x200: [10, 11, 12, 13]})
+    _write_values(rom_b, {0x200: [10, 11, 12, 14]})
+
+    monkeypatch.setattr(etm, "XML_PATHS", [str(tmp_path)])
+    monkeypatch.setattr(etm, "ROM_PATH", str(tmp_path))
+
+    consistency = etm.check_boost_control_consistency(rom_a.name)
+    assert len(consistency["boost_targets"]) == 1
+    assert len(consistency["wgdc_tables"]) == 1
+
+    diff = etm.compare_table_between_roms(rom_a.name, rom_b.name, "Boost Target (High)")
+    assert diff["diff_cells"] == 1

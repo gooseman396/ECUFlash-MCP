@@ -2,13 +2,17 @@
   "mcpServers": {
     "evo_tuner": {
       "command": "python",
-      "args": ["C:/Users/Joey/Desktop/AIEvoTunerMCP/evo_tuner_mcp.py"],
+      "args": ["C:/Users/Joey/Desktop/ECUFlash-MCP/evo_tuner_mcp.py"],
       "env": {
-        "EVO_ROM_PATH": "C:/Users/Joey/Desktop/AIEvoTunerMCP/Roms",
+        "EVO_ROM_PATH": "C:/Users/Joey/Desktop/ECUFlash-MCP/Roms",
         "EVO_XML_PATHS": "C:/Program Files (x86)/OpenECU/EcuFlash/rommetadata/mitsubishi/evo",
-        "EVO_OUTPUT_ROM_PATH": "C:/Users/Joey/Desktop/AIEvoTunerMCP/Roms/modified",
+        "EVO_OUTPUT_ROM_PATH": "C:/Users/Joey/Desktop/ECUFlash-MCP/Roms/modified",
+        "EVO_LOG_PATH": "C:/Users/Joey/Documents/EvoScan v2.9/SavedDataLogs",
         "EVO_TABLE_ALLOWLIST": "",
-        "EVO_REQUIRE_BACKUP": "true"
+        "EVO_ALLOWLIST_PROFILE": "",
+        "EVO_DEFAULT_USE_MAX_DELTA": "false",
+        "EVO_REQUIRE_BACKUP": "true",
+        "EVO_CONFIG_PATH": "C:/Users/Joey/Desktop/ECUFlash-MCP/mcp_config.json"
       }
     }
   }

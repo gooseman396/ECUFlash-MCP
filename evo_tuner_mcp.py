@@ -18,19 +18,30 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("EvoX_Calibration_Bridge")
 
-ROM_PATH = os.getenv("EVO_ROM_PATH", r"C:\Users\Joey\Desktop\AIEvoTunerMCP\Roms")
+ROOT_DIR = os.path.dirname(__file__)
+DEFAULT_ROM_PATH = os.path.join(ROOT_DIR, "Roms")
+DEFAULT_OUTPUT_ROM_PATH = os.path.join(DEFAULT_ROM_PATH, "modified")
+DEFAULT_LOG_PATH = os.path.join(ROOT_DIR, "logs")
+DEFAULT_XML_PATH = r"C:\Program Files (x86)\OpenECU\EcuFlash\rommetadata\mitsubishi\evo"
+
+ROM_PATH = os.getenv("EVO_ROM_PATH", DEFAULT_ROM_PATH)
 OUTPUT_ROM_PATH = os.getenv(
     "EVO_OUTPUT_ROM_PATH",
-    r"C:\Users\Joey\Desktop\AIEvoTunerMCP\Roms\modified",
+    DEFAULT_OUTPUT_ROM_PATH,
 )
 LOG_PATH = os.getenv(
     "EVO_LOG_PATH",
-    r"C:\Users\Joey\Documents\EvoScan v2.9\SavedDataLogs",
+    DEFAULT_LOG_PATH,
 )
 XML_PATHS = os.getenv(
     "EVO_XML_PATHS",
-    r"C:\Program Files (x86)\OpenECU\EcuFlash\rommetadata\mitsubishi\evo",
+    DEFAULT_XML_PATH,
 ).split(";")
+DEFAULT_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "mcp_config.json")
+CONFIG_PATH = os.getenv("EVO_CONFIG_PATH", DEFAULT_CONFIG_PATH)
+CONFIG_STRICT = os.getenv("EVO_CONFIG_STRICT", "false").strip().lower() in ("true", "1", "yes")
+CONFIG_WARNINGS: list[str] = []
+CONFIG_ERRORS: list[str] = []
 TABLE_ALLOWLIST_BASE = [
     name.strip().lower()
     for name in os.getenv("EVO_TABLE_ALLOWLIST", "").split(",")
@@ -38,6 +49,11 @@ TABLE_ALLOWLIST_BASE = [
 ]
 ACTIVE_ALLOWLIST_PROFILE = os.getenv("EVO_ALLOWLIST_PROFILE", "").strip().lower() or None
 REQUIRE_BACKUP = os.getenv("EVO_REQUIRE_BACKUP", "true").strip().lower() in ("true", "1", "yes")
+DEFAULT_USE_MAX_DELTA = os.getenv("EVO_DEFAULT_USE_MAX_DELTA", "false").strip().lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 ALLOWLIST_PROFILES: dict[str, list[str]] = {
     "launch": ["*launch*"],
@@ -76,6 +92,113 @@ COMMON_TABLE_QUERIES: dict[str, list[str]] = {
     ],
     "mivec": ["MIVEC"],
     "rev": ["Rev Limiter", "Stationary Rev Limiter"],
+}
+
+GUARDRAIL_PROFILES: dict[str, dict[str, object]] = {
+    "street": {
+        "max_delta": 2.0,
+        "low_rpm_rpm_threshold": 3500.0,
+        "low_rpm_boost_cap": 12.0,
+        "boost_target_caps_by_gear": {"1": 14.0, "2": 16.0, "3": 18.0},
+    },
+    "track": {
+        "max_delta": 3.0,
+        "low_rpm_rpm_threshold": 3500.0,
+        "low_rpm_boost_cap": 16.0,
+        "boost_target_caps_by_gear": {"1": 16.0, "2": 18.0, "3": 20.0},
+    },
+    "drag": {
+        "max_delta": 4.0,
+        "low_rpm_rpm_threshold": 3500.0,
+        "low_rpm_boost_cap": 18.0,
+        "boost_target_caps_by_gear": {"1": 18.0, "2": 20.0, "3": 22.0},
+    },
+}
+
+LOG_SIGNAL_SETS: dict[str, list[str]] = {
+    "launch": ["rpm", "tps", "speed", "boost", "afr", "timing", "knock", "load", "time"],
+    "boost": ["rpm", "tps", "boost", "target_boost", "wgdc", "gear", "iat", "load"],
+    "fuel": ["rpm", "tps", "afr", "stft", "ltft", "ipw", "idc", "fuel_pressure", "load"],
+    "timing": ["rpm", "tps", "timing", "knock", "iat", "load", "boost"],
+}
+
+LAUNCH_HEALTH_SETTINGS: dict[str, float] = {
+    "timing_floor": -5.0,
+    "boost_oscillation_threshold": 5.0,
+    "knock_threshold": 0.0,
+}
+
+TORQUE_RISK_SETTINGS: dict[str, float] = {
+    "rpm_threshold": 3500.0,
+    "boost_threshold": 18.0,
+    "timing_floor": 0.0,
+    "knock_threshold": 0.0,
+}
+
+TUNING_USECASES: dict[str, dict[str, object]] = {
+    "boost_targeting": {
+        "category": "boost",
+        "description": "Set boost targets and verify load/RPM axes alignment.",
+        "queries": ["Boost Target", "Boost Target Engine Load", "Boost Target (High)", "Boost Target (Low)"],
+        "required_log_signals": ["rpm", "boost", "target_boost", "wgdc", "tps", "gear", "iat", "load"],
+        "notes": ["Check for oscillation in low gears before raising targets."],
+    },
+    "boost_control": {
+        "category": "boost",
+        "description": "Validate WGDC control maps and limits against targets.",
+        "queries": ["WGDC", "Wastegate", "Boost Error", "Boost Cut", "RAX Direct Boost"],
+        "required_log_signals": ["rpm", "boost", "target_boost", "wgdc", "gear", "iat", "load"],
+        "notes": ["Confirm direct-boost tables align with target tables if enabled."],
+    },
+    "boost_safety": {
+        "category": "boost",
+        "description": "Confirm boost limits, cut tables, and compensation maps.",
+        "queries": ["Boost Cut", "Baro Comp", "IAT Comp", "Boost Limit"],
+        "required_log_signals": ["rpm", "boost", "iat", "baro", "gear", "load"],
+        "notes": ["Ensure compensations do not exceed turbo efficiency."],
+    },
+    "fuel_wot": {
+        "category": "fuel",
+        "description": "Shape WOT fuel tables for target AFR under boost.",
+        "queries": ["High Octane Fuel Map", "Low Octane Fuel Map", "Target AFR", "Open Loop Fuel"],
+        "required_log_signals": ["rpm", "afr", "boost", "tps", "ipw", "idc", "fuel_pressure", "load"],
+        "notes": ["Verify IDC headroom and pressure stability."],
+    },
+    "fuel_transient": {
+        "category": "fuel",
+        "description": "Check transient fueling and tip-in enrichment.",
+        "queries": ["Transient Fuel", "Tip-in", "Accel Enrich"],
+        "required_log_signals": ["rpm", "tps", "afr", "stft", "ltft", "ipw", "load"],
+        "notes": ["Look for lean spikes on throttle transitions."],
+    },
+    "injector_setup": {
+        "category": "fuel",
+        "description": "Confirm injector scaling and latency values.",
+        "queries": ["Injector Scaling", "Injector Latency", "Fuel Pressure"],
+        "required_log_signals": ["rpm", "stft", "ltft", "ipw", "idc", "fuel_pressure"],
+        "notes": ["Scaling errors show up in trims across load ranges."],
+    },
+    "timing_wot": {
+        "category": "timing",
+        "description": "Shape WOT timing for power while managing knock.",
+        "queries": ["High Octane Timing Map", "Low Octane Timing Map", "Timing", "Knock"],
+        "required_log_signals": ["rpm", "timing", "knock", "boost", "iat", "load"],
+        "notes": ["Prioritize knock-free timing in peak torque regions."],
+    },
+    "timing_spool": {
+        "category": "timing",
+        "description": "Use timing to help spool without excessive EGTs.",
+        "queries": ["Timing", "Launch High Octane Timing Map"],
+        "required_log_signals": ["rpm", "timing", "boost", "iat", "egt", "load"],
+        "notes": ["Avoid large timing drops that create launch bog."],
+    },
+    "timing_knock_response": {
+        "category": "timing",
+        "description": "Review knock response, correction, and limits.",
+        "queries": ["Knock", "Knock Sum", "Knock Threshold", "Knock Retard"],
+        "required_log_signals": ["rpm", "knock", "timing", "iat", "load", "boost"],
+        "notes": ["Confirm consistent recovery after knock events."],
+    },
 }
 
 TABLE_SIZE_OVERRIDES: dict[str, tuple[int, int]] = {
@@ -122,6 +245,204 @@ BLOB_DECODER_REGISTRY: dict[str, dict[str, object]] = {
     "Crossover_RPMSpeed_Ratio_5MT": {"length": 2, "data_type": "uint16"},
     "blobbits": {"length": 2, "data_type": "bits"},
 }
+
+
+def _load_config(path: str) -> dict:
+    if not path or not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as config_file:
+            return json.load(config_file)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _validate_config(config: dict) -> tuple[dict, list[str], list[str]]:
+    if not isinstance(config, dict):
+        return {}, [], ["Config root must be a JSON object."]
+
+    allowed = {
+        "axis_address_registry",
+        "table_size_overrides",
+        "table_size_patterns",
+        "common_table_queries",
+        "allowlist_profiles",
+        "guardrail_profiles",
+        "log_signal_sets",
+        "launch_health",
+        "torque_risk",
+        "tuning_usecases",
+    }
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    validated: dict[str, object] = {}
+
+    for key in config.keys():
+        if key not in allowed:
+            warnings.append(f"Unknown config key: {key}")
+
+    axis_registry = config.get("axis_address_registry")
+    if axis_registry is not None:
+        if not isinstance(axis_registry, dict):
+            errors.append("axis_address_registry must be an object.")
+        else:
+            validated["axis_address_registry"] = axis_registry
+
+    size_overrides = config.get("table_size_overrides")
+    if size_overrides is not None:
+        if not isinstance(size_overrides, dict):
+            errors.append("table_size_overrides must be an object.")
+        else:
+            validated["table_size_overrides"] = size_overrides
+
+    size_patterns = config.get("table_size_patterns")
+    if size_patterns is not None:
+        if not isinstance(size_patterns, list):
+            errors.append("table_size_patterns must be a list.")
+        else:
+            validated["table_size_patterns"] = size_patterns
+
+    common_queries = config.get("common_table_queries")
+    if common_queries is not None:
+        if not isinstance(common_queries, dict):
+            errors.append("common_table_queries must be an object.")
+        else:
+            validated["common_table_queries"] = common_queries
+
+    allowlist_profiles = config.get("allowlist_profiles")
+    if allowlist_profiles is not None:
+        if not isinstance(allowlist_profiles, dict):
+            errors.append("allowlist_profiles must be an object.")
+        else:
+            validated["allowlist_profiles"] = allowlist_profiles
+
+    guardrail_profiles = config.get("guardrail_profiles")
+    if guardrail_profiles is not None:
+        if not isinstance(guardrail_profiles, dict):
+            errors.append("guardrail_profiles must be an object.")
+        else:
+            validated["guardrail_profiles"] = guardrail_profiles
+
+    log_signal_sets = config.get("log_signal_sets")
+    if log_signal_sets is not None:
+        if not isinstance(log_signal_sets, dict):
+            errors.append("log_signal_sets must be an object.")
+        else:
+            validated["log_signal_sets"] = log_signal_sets
+
+    launch_health = config.get("launch_health")
+    if launch_health is not None:
+        if not isinstance(launch_health, dict):
+            errors.append("launch_health must be an object.")
+        else:
+            validated["launch_health"] = launch_health
+
+    torque_risk = config.get("torque_risk")
+    if torque_risk is not None:
+        if not isinstance(torque_risk, dict):
+            errors.append("torque_risk must be an object.")
+        else:
+            validated["torque_risk"] = torque_risk
+
+    tuning_usecases = config.get("tuning_usecases")
+    if tuning_usecases is not None:
+        if not isinstance(tuning_usecases, dict):
+            errors.append("tuning_usecases must be an object.")
+        else:
+            validated["tuning_usecases"] = tuning_usecases
+
+    return validated, warnings, errors
+
+
+def _apply_config(config: dict) -> None:
+    global ALLOWLIST_PROFILES
+    global COMMON_TABLE_QUERIES
+    global TABLE_SIZE_OVERRIDES
+    global TABLE_SIZE_PATTERNS
+    global AXIS_ADDRESS_REGISTRY
+    global GUARDRAIL_PROFILES
+    global LOG_SIGNAL_SETS
+    global LAUNCH_HEALTH_SETTINGS
+    global TORQUE_RISK_SETTINGS
+    global TUNING_USECASES
+
+    allowlist_profiles = config.get("allowlist_profiles")
+    if isinstance(allowlist_profiles, dict):
+        ALLOWLIST_PROFILES = {str(k): list(v) for k, v in allowlist_profiles.items()}
+
+    common_queries = config.get("common_table_queries")
+    if isinstance(common_queries, dict):
+        COMMON_TABLE_QUERIES = {str(k): list(v) for k, v in common_queries.items()}
+
+    size_overrides = config.get("table_size_overrides")
+    if isinstance(size_overrides, dict):
+        TABLE_SIZE_OVERRIDES = {
+            str(k).lower(): (int(v[0]), int(v[1]))
+            for k, v in size_overrides.items()
+            if isinstance(v, (list, tuple)) and len(v) == 2
+        }
+
+    size_patterns = config.get("table_size_patterns")
+    if isinstance(size_patterns, list):
+        compiled: list[tuple[re.Pattern[str], tuple[int, int]]] = []
+        for entry in size_patterns:
+            if not isinstance(entry, dict):
+                continue
+            pattern = entry.get("pattern")
+            size = entry.get("size")
+            if not pattern or not isinstance(size, (list, tuple)) or len(size) != 2:
+                continue
+            compiled.append((re.compile(pattern, re.IGNORECASE), (int(size[0]), int(size[1]))))
+        if compiled:
+            TABLE_SIZE_PATTERNS = compiled
+
+    axis_registry = config.get("axis_address_registry")
+    if isinstance(axis_registry, dict):
+        parsed: dict[int, dict[str, object]] = {}
+        for key, value in axis_registry.items():
+            try:
+                address = int(str(key), 16) if str(key).lower().startswith("0x") else int(key)
+            except ValueError:
+                continue
+            if not isinstance(value, dict):
+                continue
+            elements = value.get("elements")
+            scaling = value.get("scaling")
+            if elements is None:
+                continue
+            parsed[address] = {"elements": int(elements), "scaling": scaling}
+        if parsed:
+            AXIS_ADDRESS_REGISTRY = parsed
+
+    guardrail_profiles = config.get("guardrail_profiles")
+    if isinstance(guardrail_profiles, dict):
+        GUARDRAIL_PROFILES = {str(k): dict(v) for k, v in guardrail_profiles.items()}
+
+    log_signal_sets = config.get("log_signal_sets")
+    if isinstance(log_signal_sets, dict):
+        LOG_SIGNAL_SETS = {str(k): list(v) for k, v in log_signal_sets.items()}
+
+    launch_health = config.get("launch_health")
+    if isinstance(launch_health, dict):
+        LAUNCH_HEALTH_SETTINGS = {str(k): float(v) for k, v in launch_health.items()}
+
+    torque_risk = config.get("torque_risk")
+    if isinstance(torque_risk, dict):
+        TORQUE_RISK_SETTINGS = {str(k): float(v) for k, v in torque_risk.items()}
+
+    tuning_usecases = config.get("tuning_usecases")
+    if isinstance(tuning_usecases, dict):
+        TUNING_USECASES = {str(k): dict(v) for k, v in tuning_usecases.items()}
+
+
+_raw_config = _load_config(CONFIG_PATH)
+_validated_config, _config_warnings, _config_errors = _validate_config(_raw_config)
+CONFIG_WARNINGS = _config_warnings
+CONFIG_ERRORS = _config_errors
+if CONFIG_ERRORS and CONFIG_STRICT:
+    raise ValueError(f"Config validation failed: {CONFIG_ERRORS}")
+_apply_config(_validated_config)
 
 
 @dataclass
@@ -559,9 +880,18 @@ def _detect_log_columns(fields: list[str] | None) -> dict[str, str | None]:
         "tps": find_exact("TPS") or find_contains(["tps", "throttle"]),
         "speed": find_exact("Speed") or find_contains(["speed", "vehicle"]),
         "boost": find_exact("Boost") or find_contains(["boost", "map"]),
+        "target_boost": find_contains(["target boost", "boost target", "boosttar"]),
+        "wgdc": find_contains(["wgdc", "wastegate", "wg duty", "duty"]),
+        "gear": find_contains(["gear"]),
+        "iat": find_contains(["iat", "intake temp", "iatf", "mat"]),
         "afr": find_exact("AFR") or find_contains(["afr", "wideband"]),
+        "stft": find_contains(["stft", "short term"]),
+        "ltft": find_contains(["ltft", "long term"]),
+        "fuel_pressure": find_contains(["fuel pressure", "fp"]),
         "timing": find_exact("TimingAdv") or find_contains(["timing", "spark"]),
         "knock": find_exact("KnockSum") or find_contains(["knock"]),
+        "baro": find_contains(["baro", "barometric"]),
+        "egt": find_contains(["egt", "exhaust gas"]),
         "ipw": find_exact("IPW") or find_contains(["ipw", "pulse"]),
         "idc": find_exact("IDC") or find_contains(["idc"]),
         "load": find_exact("Load") or find_contains(["load"]),
@@ -1116,6 +1446,10 @@ def get_current_context() -> dict:
         "output_rom_path": OUTPUT_ROM_PATH,
         "log_path": LOG_PATH,
         "xml_paths": XML_PATHS,
+        "config_path": CONFIG_PATH,
+        "config_strict": CONFIG_STRICT,
+        "config_warnings": CONFIG_WARNINGS,
+        "config_errors": CONFIG_ERRORS,
         "allowlist_profile": ACTIVE_ALLOWLIST_PROFILE,
         "allowlist": _get_allowlist(),
         "require_backup": REQUIRE_BACKUP,
@@ -1194,6 +1528,101 @@ def list_common_tables_for_rom(rom_filename: str, profile: str = "launch", limit
         }
         for td in results
     ]
+
+
+@mcp.tool()
+def list_tuning_usecases(category: str | None = None) -> list[dict]:
+    """Lists tuning usecases and their categories."""
+    cat = category.strip().lower() if category else None
+    results = []
+    for name, info in TUNING_USECASES.items():
+        usecase_cat = str(info.get("category", "")).lower()
+        if cat and usecase_cat != cat:
+            continue
+        results.append(
+            {
+                "name": name,
+                "category": info.get("category"),
+                "description": info.get("description"),
+            }
+        )
+    return results
+
+
+def _resolve_usecase_key(usecase: str) -> str | None:
+    key = usecase.strip().lower()
+    for existing in TUNING_USECASES.keys():
+        if existing.lower() == key:
+            return existing
+    return None
+
+
+@mcp.tool()
+def get_tuning_usecase(usecase: str) -> dict:
+    """Returns metadata for a tuning usecase."""
+    resolved = _resolve_usecase_key(usecase)
+    info = TUNING_USECASES.get(resolved) if resolved else None
+    if not info:
+        return {"error": f"Unknown usecase: {usecase}", "usecases": list(TUNING_USECASES.keys())}
+    return {"name": resolved, **info}
+
+
+@mcp.tool()
+def list_usecase_tables_for_rom(
+    rom_filename: str,
+    usecase: str,
+    limit: int = 50,
+    pretty: bool = True,
+) -> list:
+    """Lists tables for a ROM using tuning usecase queries."""
+    resolved = _resolve_usecase_key(usecase)
+    info = TUNING_USECASES.get(resolved) if resolved else None
+    if not info:
+        return {"error": f"Unknown usecase: {usecase}", "usecases": list(TUNING_USECASES.keys())}
+    queries = info.get("queries") or []
+    if not queries:
+        return {"error": f"Usecase has no queries: {usecase}"}
+
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    table_defs: list[TableDef] = []
+    for xml_path in chain:
+        table_defs.extend(_parse_table_defs_for_xml(xml_path))
+
+    matches: list[TableDef] = []
+    for query in queries:
+        matches.extend([td for td in table_defs if str(query).lower() in td.name.lower()])
+
+    unique: dict[str, TableDef] = {}
+    for td in matches:
+        key = td.name.lower()
+        if key not in unique:
+            unique[key] = td
+
+    results = list(unique.values())[:limit]
+    if pretty:
+        return _format_table_rows(results)
+    return [
+        {
+            "name": td.name,
+            "address": f"0x{td.address:X}",
+            "rows": td.rows,
+            "cols": td.cols,
+            "data_type": td.data_type,
+            "scaling": td.scaling,
+            "swapxy": td.swapxy,
+            "source_xml": td.source_xml,
+        }
+        for td in results
+    ]
+
+
+@mcp.tool()
+def get_guardrail_profiles() -> dict:
+    """Returns guardrail profiles and their thresholds."""
+    return {"profiles": GUARDRAIL_PROFILES}
 
 
 @mcp.tool()
@@ -1933,6 +2362,142 @@ def compare_roms(
     }
 
 
+def _table_size_for_def(table_def: TableDef) -> tuple[int | None, int | None]:
+    rows = table_def.rows
+    cols = table_def.cols
+    if rows is None or cols is None:
+        inferred_rows, inferred_cols = _infer_table_size(table_def.name)
+        rows = rows or inferred_rows
+        cols = cols or inferred_cols
+    return rows, cols
+
+
+@mcp.tool()
+def check_boost_control_consistency(rom_filename: str) -> dict:
+    """Checks boost target/WGDC/direct-boost tables for mismatches or missing dependencies."""
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    table_defs: list[TableDef] = []
+    for xml_path in chain:
+        table_defs.extend(_parse_table_defs_for_xml(xml_path))
+
+    target_tables = [td for td in table_defs if "boost target" in td.name.lower()]
+    wgdc_tables = [
+        td
+        for td in table_defs
+        if "wgdc" in td.name.lower() or "wastegate" in td.name.lower()
+    ]
+    direct_tables = [
+        td
+        for td in table_defs
+        if "direct boost" in td.name.lower() or "rax" in td.name.lower()
+    ]
+
+    warnings = []
+    if direct_tables and not target_tables:
+        warnings.append("Direct boost tables found without boost target tables.")
+    if direct_tables and not wgdc_tables:
+        warnings.append("Direct boost tables found without WGDC tables.")
+
+    size_mismatches = []
+    if target_tables and wgdc_tables:
+        target_rows, target_cols = _table_size_for_def(target_tables[0])
+        wgdc_rows, wgdc_cols = _table_size_for_def(wgdc_tables[0])
+        if target_rows != wgdc_rows or target_cols != wgdc_cols:
+            size_mismatches.append(
+                {
+                    "target": target_tables[0].name,
+                    "wgdc": wgdc_tables[0].name,
+                    "target_size": (target_rows, target_cols),
+                    "wgdc_size": (wgdc_rows, wgdc_cols),
+                }
+            )
+
+    def summarize(tables: list[TableDef]) -> list[dict]:
+        summary = []
+        for td in tables:
+            rows, cols = _table_size_for_def(td)
+            summary.append(
+                {
+                    "name": td.name,
+                    "rows": rows,
+                    "cols": cols,
+                    "scaling": td.scaling,
+                    "source_xml": td.source_xml,
+                }
+            )
+        return summary
+
+    return {
+        "rom_filename": rom_filename,
+        "boost_targets": summarize(target_tables),
+        "wgdc_tables": summarize(wgdc_tables),
+        "direct_boost_tables": summarize(direct_tables),
+        "warnings": warnings,
+        "size_mismatches": size_mismatches,
+    }
+
+
+@mcp.tool()
+def compare_table_between_roms(
+    rom_filename_a: str,
+    rom_filename_b: str,
+    table_name: str,
+    apply_scaling: bool = True,
+    tolerance: float = 0.0,
+) -> dict:
+    """Summarizes table deltas between two ROMs without writing changes."""
+    if tolerance < 0:
+        return {"error": "tolerance must be >= 0."}
+    read_a = read_table_for_rom(rom_filename_a, table_name, apply_scaling=apply_scaling)
+    if "data" not in read_a:
+        return {"error": "Unable to read table from rom_filename_a.", "result": read_a}
+    read_b = read_table_for_rom(rom_filename_b, table_name, apply_scaling=apply_scaling)
+    if "data" not in read_b:
+        return {"error": "Unable to read table from rom_filename_b.", "result": read_b}
+
+    data_a = read_a["data"]
+    data_b = read_b["data"]
+    if len(data_a) != len(data_b) or any(len(ra) != len(rb) for ra, rb in zip(data_a, data_b)):
+        return {
+            "rom_a": rom_filename_a,
+            "rom_b": rom_filename_b,
+            "table": table_name,
+            "error": "Table dimensions differ.",
+            "rows_a": len(data_a),
+            "cols_a": len(data_a[0]) if data_a else 0,
+            "rows_b": len(data_b),
+            "cols_b": len(data_b[0]) if data_b else 0,
+        }
+
+    flat_a = [float(value) for row in data_a for value in row]
+    flat_b = [float(value) for row in data_b for value in row]
+    deltas = [b - a for a, b in zip(flat_a, flat_b)]
+
+    changed = [delta for delta in deltas if abs(delta) > tolerance]
+    max_abs_delta = max((abs(delta) for delta in deltas), default=0.0)
+    avg_delta = sum(deltas) / len(deltas) if deltas else 0.0
+
+    sample_deltas = []
+    for idx, delta in enumerate(deltas[:10]):
+        if abs(delta) > tolerance:
+            sample_deltas.append({"index": idx, "delta": delta})
+
+    return {
+        "rom_a": rom_filename_a,
+        "rom_b": rom_filename_b,
+        "table": table_name,
+        "rows": len(data_a),
+        "cols": len(data_a[0]) if data_a else 0,
+        "diff_cells": len(changed),
+        "max_abs_delta": max_abs_delta,
+        "avg_delta": avg_delta,
+        "sample_deltas": sample_deltas,
+    }
+
+
 @mcp.tool()
 def list_logs(contains: str = "", limit: int = 50) -> list[str]:
     """Lists log files in the log directory, optionally filtered by substring."""
@@ -1969,6 +2534,34 @@ def read_log(filename: str, max_lines: int = 200) -> dict:
 
 
 @mcp.tool()
+def check_log_signals(filename: str, signal_set: str = "launch") -> dict:
+    """Checks a log file for required signals using a named signal set."""
+    log_path = _safe_log_path(filename)
+    if log_path is None:
+        return {"error": "Invalid filename."}
+    if not os.path.isfile(log_path):
+        return {"error": f"Log file not found: {log_path}"}
+
+    required = LOG_SIGNAL_SETS.get(signal_set)
+    if required is None:
+        return {"error": f"Unknown signal_set: {signal_set}", "signal_sets": list(LOG_SIGNAL_SETS.keys())}
+
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as log_file:
+        reader = csv.DictReader(log_file)
+        fields = reader.fieldnames or []
+        columns = _detect_log_columns(fields)
+        missing = _missing_log_columns(columns, required)
+
+    return {
+        "filename": filename,
+        "signal_set": signal_set,
+        "required_signals": required,
+        "detected_columns": columns,
+        "missing_columns": missing,
+    }
+
+
+@mcp.tool()
 def analyze_launch_log(
     filename: str,
     min_tps: float = 70.0,
@@ -1990,6 +2583,7 @@ def analyze_launch_log(
 
     samples: list[dict] = []
     rpms: list[float] = []
+    speeds: list[float] = []
     boosts: list[float] = []
     afrs: list[float] = []
     timings: list[float] = []
@@ -2024,6 +2618,7 @@ def analyze_launch_log(
             time_val = _safe_float(row.get(columns.get("time"))) if columns.get("time") else None
 
             rpms.append(rpm)
+            speeds.append(speed)
             if boost is not None:
                 boosts.append(boost)
             if afr is not None:
@@ -2069,6 +2664,8 @@ def analyze_launch_log(
     summary = {
         "rpm_min": min(rpms),
         "rpm_max": max(rpms),
+        "speed_min": min(speeds) if speeds else None,
+        "speed_max": max(speeds) if speeds else None,
         "boost_min": min(boosts) if boosts else None,
         "boost_max": max(boosts) if boosts else None,
         "afr_min": min(afrs) if afrs else None,
@@ -2101,6 +2698,193 @@ def analyze_launch_log(
         "missing_columns": missing,
         "summary": summary,
         "samples": pretty_samples,
+    }
+
+
+def _scalar_value_or_error(rom_filename: str, table_name: str) -> dict:
+    result = read_scalar_for_rom(rom_filename, table_name)
+    if "value" not in result:
+        return {"error": result}
+    return {"value": result["value"], "units": result.get("units"), "table": result.get("table_name")}
+
+
+def _table_min_max(table: list[list[float]]) -> dict:
+    flat = [float(value) for row in table for value in row]
+    if not flat:
+        return {"min": None, "max": None}
+    return {"min": min(flat), "max": max(flat)}
+
+
+@mcp.tool()
+def analyze_launch_health(
+    rom_filename: str,
+    log_filename: str,
+    min_tps: float = 70.0,
+    max_speed: float = 5.0,
+    rpm_min: float = 2500.0,
+    rpm_max: float = 5000.0,
+) -> dict:
+    """Combines ROM tables and log data into a launch health report."""
+    launch = analyze_launch_log(
+        log_filename,
+        min_tps=min_tps,
+        max_speed=max_speed,
+        rpm_min=rpm_min,
+        rpm_max=rpm_max,
+    )
+    if "summary" not in launch:
+        return {"error": "Launch log summary unavailable.", "launch": launch}
+
+    signal_check = check_log_signals(log_filename, "launch")
+
+    rom_scalars = {
+        "launch_speed_limit": _scalar_value_or_error(
+            rom_filename, "Maximum Speed permitted for Launch Maps"
+        ),
+        "launch_tps_min": _scalar_value_or_error(
+            rom_filename, "Minimum TPS required for NLTS or Launch Maps"
+        ),
+        "stationary_rev_limit": _scalar_value_or_error(
+            rom_filename, "Stationary Rev Limiter"
+        ),
+    }
+
+    launch_timing = read_table_for_rom(rom_filename, "Launch High Octane Timing Map")
+    launch_fuel = read_table_for_rom(rom_filename, "Launch High Octane Fuel Map")
+
+    timing_stats = None
+    if "data" in launch_timing:
+        timing_stats = _table_min_max(launch_timing["data"])
+
+    fuel_stats = None
+    if "data" in launch_fuel:
+        fuel_stats = _table_min_max(launch_fuel["data"])
+
+    summary = launch["summary"]
+    flags = []
+    timing_floor = LAUNCH_HEALTH_SETTINGS.get("timing_floor", -5.0)
+    boost_oscillation = LAUNCH_HEALTH_SETTINGS.get("boost_oscillation_threshold", 5.0)
+    knock_threshold = LAUNCH_HEALTH_SETTINGS.get("knock_threshold", 0.0)
+
+    if summary.get("timing_min") is not None and summary["timing_min"] < timing_floor:
+        flags.append({"issue": "timing_below_floor", "timing_min": summary["timing_min"]})
+
+    boost_min = summary.get("boost_min")
+    boost_max = summary.get("boost_max")
+    if boost_min is not None and boost_max is not None:
+        if boost_max - boost_min >= boost_oscillation:
+            flags.append({"issue": "boost_oscillation", "boost_delta": boost_max - boost_min})
+
+    if summary.get("knock_max") is not None and summary["knock_max"] > knock_threshold:
+        flags.append({"issue": "knock_detected", "knock_max": summary["knock_max"]})
+
+    speed_max = summary.get("speed_max")
+    launch_speed_limit = rom_scalars.get("launch_speed_limit", {}).get("value")
+    if speed_max is not None and launch_speed_limit is not None:
+        if speed_max > launch_speed_limit:
+            flags.append(
+                {
+                    "issue": "launch_speed_exceeds_limit",
+                    "speed_max": speed_max,
+                    "limit": launch_speed_limit,
+                }
+            )
+
+    return {
+        "rom_filename": rom_filename,
+        "log_filename": log_filename,
+        "launch_summary": summary,
+        "signal_check": signal_check,
+        "rom_scalars": rom_scalars,
+        "launch_timing_stats": timing_stats,
+        "launch_fuel_stats": fuel_stats,
+        "flags": flags,
+    }
+
+
+@mcp.tool()
+def estimate_low_rpm_torque_risk(
+    filename: str,
+    rpm_threshold: float | None = None,
+    boost_threshold: float | None = None,
+    timing_floor: float | None = None,
+    knock_threshold: float | None = None,
+    min_tps: float | None = None,
+    max_speed: float | None = None,
+    max_rows: int = 200000,
+) -> dict:
+    """Estimates low-RPM torque risk from log samples using configurable thresholds."""
+    log_path = _safe_log_path(filename)
+    if log_path is None:
+        return {"error": "Invalid filename."}
+    if not os.path.isfile(log_path):
+        return {"error": f"Log file not found: {log_path}"}
+    if max_rows <= 0:
+        return {"error": "max_rows must be > 0."}
+
+    rpm_threshold = rpm_threshold if rpm_threshold is not None else TORQUE_RISK_SETTINGS.get("rpm_threshold", 3500.0)
+    boost_threshold = boost_threshold if boost_threshold is not None else TORQUE_RISK_SETTINGS.get("boost_threshold", 18.0)
+    timing_floor = timing_floor if timing_floor is not None else TORQUE_RISK_SETTINGS.get("timing_floor", 0.0)
+    knock_threshold = knock_threshold if knock_threshold is not None else TORQUE_RISK_SETTINGS.get("knock_threshold", 0.0)
+
+    total_samples = 0
+    low_rpm_samples = 0
+    risk_samples = 0
+
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as log_file:
+        reader = csv.DictReader(log_file)
+        fields = reader.fieldnames or []
+        columns = _detect_log_columns(fields)
+        missing = _missing_log_columns(columns, ["rpm", "boost", "timing", "knock"])
+
+        for idx, row in enumerate(reader):
+            if idx >= max_rows:
+                break
+            rpm = _safe_float(row.get(columns.get("rpm"))) if columns.get("rpm") else None
+            if rpm is None:
+                continue
+            if min_tps is not None:
+                tps = _safe_float(row.get(columns.get("tps"))) if columns.get("tps") else None
+                if tps is None or tps < min_tps:
+                    continue
+            if max_speed is not None:
+                speed = _safe_float(row.get(columns.get("speed"))) if columns.get("speed") else None
+                if speed is None or speed > max_speed:
+                    continue
+
+            total_samples += 1
+            if rpm <= rpm_threshold:
+                low_rpm_samples += 1
+                boost = _safe_float(row.get(columns.get("boost"))) if columns.get("boost") else None
+                timing = _safe_float(row.get(columns.get("timing"))) if columns.get("timing") else None
+                knock = _safe_float(row.get(columns.get("knock"))) if columns.get("knock") else None
+
+                boost_flag = boost is not None and boost >= boost_threshold
+                timing_flag = timing is not None and timing <= timing_floor
+                knock_flag = knock is not None and knock > knock_threshold
+
+                if boost_flag and (timing_flag or knock_flag):
+                    risk_samples += 1
+
+    risk_ratio = (risk_samples / low_rpm_samples) if low_rpm_samples else 0.0
+
+    return {
+        "filename": filename,
+        "thresholds": {
+            "rpm_threshold": rpm_threshold,
+            "boost_threshold": boost_threshold,
+            "timing_floor": timing_floor,
+            "knock_threshold": knock_threshold,
+        },
+        "filters": {
+            "min_tps": min_tps,
+            "max_speed": max_speed,
+        },
+        "total_samples": total_samples,
+        "low_rpm_samples": low_rpm_samples,
+        "risk_samples": risk_samples,
+        "risk_ratio": risk_ratio,
+        "missing_columns": missing,
     }
 
 
@@ -2336,6 +3120,7 @@ def map_log_to_table(
     if not os.path.isfile(log_path):
         return {"error": f"Log file not found: {log_path}"}
 
+    missing: list[str] = []
     counts: dict[tuple[int, int], int] = {}
     with open(log_path, "r", encoding="utf-8", errors="ignore") as log_file:
         reader = csv.DictReader(log_file)
@@ -2447,7 +3232,7 @@ def write_table(
     output_filename: str | None = None,
     overwrite_output: bool = False,
     max_delta: float | None = None,
-    use_default_max_delta: bool = True,
+    use_default_max_delta: bool = DEFAULT_USE_MAX_DELTA,
     write_metadata: bool = True,
 ) -> dict:
     """Writes an entire table to a new ROM file (with safeguards)."""
@@ -2479,7 +3264,7 @@ def write_cell(
     output_filename: str | None = None,
     overwrite_output: bool = False,
     max_delta: float | None = None,
-    use_default_max_delta: bool = True,
+    use_default_max_delta: bool = DEFAULT_USE_MAX_DELTA,
     write_metadata: bool = True,
 ) -> dict:
     """Writes a single cell to a new ROM file (with safeguards)."""
@@ -2516,7 +3301,7 @@ def write_table_for_rom(
     output_filename: str | None = None,
     overwrite_output: bool = False,
     max_delta: float | None = None,
-    use_default_max_delta: bool = True,
+    use_default_max_delta: bool = DEFAULT_USE_MAX_DELTA,
     write_metadata: bool = True,
 ) -> dict:
     """Writes a table using the ROM's XML include chain for matching."""
@@ -2553,7 +3338,7 @@ def preview_write_table_for_rom(
     table_name: str,
     data: list[list[float]],
     max_delta: float | None = None,
-    use_default_max_delta: bool = True,
+    use_default_max_delta: bool = DEFAULT_USE_MAX_DELTA,
 ) -> dict:
     """Previews a table write and reports deltas without writing."""
     error = _validate_table_name(table_name)
@@ -2590,7 +3375,7 @@ def write_cell_for_rom(
     output_filename: str | None = None,
     overwrite_output: bool = False,
     max_delta: float | None = None,
-    use_default_max_delta: bool = True,
+    use_default_max_delta: bool = DEFAULT_USE_MAX_DELTA,
     write_metadata: bool = True,
 ) -> dict:
     """Writes a single cell using the ROM's XML include chain for matching."""
@@ -2627,7 +3412,7 @@ def preview_write_cell_for_rom(
     col: int,
     value: float,
     max_delta: float | None = None,
-    use_default_max_delta: bool = True,
+    use_default_max_delta: bool = DEFAULT_USE_MAX_DELTA,
 ) -> dict:
     """Previews a single-cell write without writing."""
     error = _validate_table_name(table_name)
@@ -2657,7 +3442,7 @@ def write_scalar_for_rom(
     output_filename: str | None = None,
     overwrite_output: bool = False,
     max_delta: float | None = None,
-    use_default_max_delta: bool = True,
+    use_default_max_delta: bool = DEFAULT_USE_MAX_DELTA,
     write_metadata: bool = True,
 ) -> dict:
     """Writes a 1D scalar by name using the ROM's XML include chain."""

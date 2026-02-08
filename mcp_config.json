@@ -1,0 +1,166 @@
+{
+  "axis_address_registry": {
+    "0x6286A": {"elements": 9, "scaling": "Throttle_Main - Stored Minimum Throttle %"},
+    "0x627E8": {"elements": 18, "scaling": "RPM"},
+    "0x6112C": {"elements": 21, "scaling": "Load"},
+    "0x61106": {"elements": 16, "scaling": "RPM"},
+    "0x611A6": {"elements": 22, "scaling": "Load"},
+    "0x61172": {"elements": 23, "scaling": "RPM"}
+  },
+  "table_size_overrides": {
+    "high octane timing map": [23, 22],
+    "low octane timing map": [23, 22],
+    "launch high octane timing map": [23, 22],
+    "high octane fuel map": [16, 21],
+    "low octane fuel map": [16, 21],
+    "launch high octane fuel map": [16, 21]
+  },
+  "table_size_patterns": [
+    {"pattern": "alternate #\\d+ high octane timing map", "size": [23, 22]},
+    {"pattern": "alternate #\\d+ high octane fuel map", "size": [16, 21]},
+    {"pattern": "boost target engine load", "size": [9, 18]},
+    {"pattern": "boost target", "size": [9, 18]},
+    {"pattern": "wgdc map", "size": [9, 18]},
+    {"pattern": "timing map", "size": [23, 22]},
+    {"pattern": "fuel map", "size": [16, 21]}
+  ],
+  "common_table_queries": {
+    "launch": [
+      "Launch High Octane Timing Map",
+      "Launch High Octane Fuel Map",
+      "Stationary Rev Limiter",
+      "Maximum Speed permitted for Launch Maps",
+      "Minimum TPS required for NLTS or Launch Maps"
+    ],
+    "boost": [
+      "Boost Target",
+      "WGDC",
+      "Wastegate",
+      "Boost Cut",
+      "RAX Direct Boost Baro Comp"
+    ],
+    "fuel": [
+      "High Octane Fuel Map",
+      "Low Octane Fuel Map",
+      "Injector Scaling",
+      "Fuel Pressure"
+    ],
+    "timing": [
+      "High Octane Timing Map",
+      "Low Octane Timing Map",
+      "Timing"
+    ],
+    "mivec": ["MIVEC"],
+    "rev": ["Rev Limiter", "Stationary Rev Limiter"]
+  },
+  "allowlist_profiles": {
+    "launch": ["*launch*"],
+    "boost": ["*boost*", "*wgdc*", "*wgd*", "*wastegate*"],
+    "fuel": ["*fuel*", "*afr*"],
+    "timing": ["*timing*"],
+    "mivec": ["*mivec*"],
+    "rev": ["*rev*", "*rpm*"]
+  },
+  "guardrail_profiles": {
+    "street": {
+      "max_delta": 2.0,
+      "low_rpm_rpm_threshold": 3500.0,
+      "low_rpm_boost_cap": 12.0,
+      "boost_target_caps_by_gear": {"1": 14.0, "2": 16.0, "3": 18.0}
+    },
+    "track": {
+      "max_delta": 3.0,
+      "low_rpm_rpm_threshold": 3500.0,
+      "low_rpm_boost_cap": 16.0,
+      "boost_target_caps_by_gear": {"1": 16.0, "2": 18.0, "3": 20.0}
+    },
+    "drag": {
+      "max_delta": 4.0,
+      "low_rpm_rpm_threshold": 3500.0,
+      "low_rpm_boost_cap": 18.0,
+      "boost_target_caps_by_gear": {"1": 18.0, "2": 20.0, "3": 22.0}
+    }
+  },
+  "log_signal_sets": {
+    "launch": ["rpm", "tps", "speed", "boost", "afr", "timing", "knock", "load", "time"],
+    "boost": ["rpm", "tps", "boost", "target_boost", "wgdc", "gear", "iat", "load"],
+    "fuel": ["rpm", "tps", "afr", "stft", "ltft", "ipw", "idc", "fuel_pressure", "load"],
+    "timing": ["rpm", "tps", "timing", "knock", "iat", "load", "boost"]
+  },
+  "launch_health": {
+    "timing_floor": -5.0,
+    "boost_oscillation_threshold": 5.0,
+    "knock_threshold": 0.0
+  },
+  "torque_risk": {
+    "rpm_threshold": 3500.0,
+    "boost_threshold": 18.0,
+    "timing_floor": 0.0,
+    "knock_threshold": 0.0
+  },
+  "tuning_usecases": {
+    "boost_targeting": {
+      "category": "boost",
+      "description": "Set boost targets and verify load/RPM axes alignment.",
+      "queries": ["Boost Target", "Boost Target Engine Load", "Boost Target (High)", "Boost Target (Low)"],
+      "required_log_signals": ["rpm", "boost", "target_boost", "wgdc", "tps", "gear", "iat", "load"],
+      "notes": ["Check for oscillation in low gears before raising targets."]
+    },
+    "boost_control": {
+      "category": "boost",
+      "description": "Validate WGDC control maps and limits against targets.",
+      "queries": ["WGDC", "Wastegate", "Boost Error", "Boost Cut", "RAX Direct Boost"],
+      "required_log_signals": ["rpm", "boost", "target_boost", "wgdc", "gear", "iat", "load"],
+      "notes": ["Confirm direct-boost tables align with target tables if enabled."]
+    },
+    "boost_safety": {
+      "category": "boost",
+      "description": "Confirm boost limits, cut tables, and compensation maps.",
+      "queries": ["Boost Cut", "Baro Comp", "IAT Comp", "Boost Limit"],
+      "required_log_signals": ["rpm", "boost", "iat", "baro", "gear", "load"],
+      "notes": ["Ensure compensations do not exceed turbo efficiency."]
+    },
+    "fuel_wot": {
+      "category": "fuel",
+      "description": "Shape WOT fuel tables for target AFR under boost.",
+      "queries": ["High Octane Fuel Map", "Low Octane Fuel Map", "Target AFR", "Open Loop Fuel"],
+      "required_log_signals": ["rpm", "afr", "boost", "tps", "ipw", "idc", "fuel_pressure", "load"],
+      "notes": ["Verify IDC headroom and pressure stability."]
+    },
+    "fuel_transient": {
+      "category": "fuel",
+      "description": "Check transient fueling and tip-in enrichment.",
+      "queries": ["Transient Fuel", "Tip-in", "Accel Enrich"],
+      "required_log_signals": ["rpm", "tps", "afr", "stft", "ltft", "ipw", "load"],
+      "notes": ["Look for lean spikes on throttle transitions."]
+    },
+    "injector_setup": {
+      "category": "fuel",
+      "description": "Confirm injector scaling and latency values.",
+      "queries": ["Injector Scaling", "Injector Latency", "Fuel Pressure"],
+      "required_log_signals": ["rpm", "stft", "ltft", "ipw", "idc", "fuel_pressure"],
+      "notes": ["Scaling errors show up in trims across load ranges."]
+    },
+    "timing_wot": {
+      "category": "timing",
+      "description": "Shape WOT timing for power while managing knock.",
+      "queries": ["High Octane Timing Map", "Low Octane Timing Map", "Timing", "Knock"],
+      "required_log_signals": ["rpm", "timing", "knock", "boost", "iat", "load"],
+      "notes": ["Prioritize knock-free timing in peak torque regions."]
+    },
+    "timing_spool": {
+      "category": "timing",
+      "description": "Use timing to help spool without excessive EGTs.",
+      "queries": ["Timing", "Launch High Octane Timing Map"],
+      "required_log_signals": ["rpm", "timing", "boost", "iat", "egt", "load"],
+      "notes": ["Avoid large timing drops that create launch bog."]
+    },
+    "timing_knock_response": {
+      "category": "timing",
+      "description": "Review knock response, correction, and limits.",
+      "queries": ["Knock", "Knock Sum", "Knock Threshold", "Knock Retard"],
+      "required_log_signals": ["rpm", "knock", "timing", "iat", "load", "boost"],
+      "notes": ["Confirm consistent recovery after knock events."]
+    }
+  }
+}
