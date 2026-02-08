@@ -33,3 +33,9 @@ If you are launching via an MCP client, point it at this server entry point and 
 - `identify_rom` to confirm XML definition matching.
 - `list_tables_for_rom` to verify table discovery.
 - `read_table_with_axes_for_rom` to confirm axes and scaling behavior.
+
+## Risks and Disclaimer
+- Use at your own risk. Calibration changes can damage engines, drivetrains, or emissions systems if used incorrectly.
+- Logs, tables, and recommendations are informational only and may be incomplete or inaccurate.
+- You are solely responsible for any changes you apply to your vehicle and for validating results safely.
+- By using this MCP server, you agree that the author is not responsible or liable for any issues, damage, or losses related to its use.
