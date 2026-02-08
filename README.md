@@ -34,6 +34,19 @@ If you are launching via an MCP client, point it at this server entry point and 
 - `list_tables_for_rom` to verify table discovery.
 - `read_table_with_axes_for_rom` to confirm axes and scaling behavior.
 
+### Examples (Common Flows)
+- ROM discovery: `identify_rom` -> `get_definition_chain` -> `list_common_tables_for_rom`.
+- Table inspect: `find_table` -> `read_table_with_axes_for_rom`.
+- Launch analysis: `analyze_launch_log` -> `extract_launch_window` -> `map_log_to_table`.
+- Safe write preview: `preview_write_table_for_rom` or `preview_write_cell_for_rom` before `write_table_for_rom`.
+- Cache refresh after XML edits: `refresh_xml_cache`.
+
+### AI-Friendly Helpers
+- `get_current_context` provides paths, allowlist profile, and active settings.
+- `list_common_tables_for_rom` reduces table hunting by profile.
+- `find_table` returns axis metadata for exact matches.
+- `preview_write_table_for_rom` reports deltas without writing.
+
 ## Risks and Disclaimer
 - Use at your own risk. Calibration changes can damage engines, drivetrains, or emissions systems if used incorrectly.
 - Logs, tables, and recommendations are informational only and may be incomplete or inaccurate.

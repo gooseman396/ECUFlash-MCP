@@ -48,6 +48,51 @@ ALLOWLIST_PROFILES: dict[str, list[str]] = {
     "rev": ["*rev*", "*rpm*"],
 }
 
+COMMON_TABLE_QUERIES: dict[str, list[str]] = {
+    "launch": [
+        "Launch High Octane Timing Map",
+        "Launch High Octane Fuel Map",
+        "Stationary Rev Limiter",
+        "Maximum Speed permitted for Launch Maps",
+        "Minimum TPS required for NLTS or Launch Maps",
+    ],
+    "boost": [
+        "Boost Target",
+        "WGDC",
+        "Wastegate",
+        "Boost Cut",
+    ],
+    "fuel": [
+        "High Octane Fuel Map",
+        "Low Octane Fuel Map",
+        "Injector Scaling",
+        "Fuel Pressure",
+    ],
+    "timing": [
+        "High Octane Timing Map",
+        "Low Octane Timing Map",
+        "Timing",
+    ],
+    "mivec": ["MIVEC"],
+    "rev": ["Rev Limiter", "Stationary Rev Limiter"],
+}
+
+TABLE_SIZE_OVERRIDES: dict[str, tuple[int, int]] = {
+    "high octane timing map": (23, 22),
+    "low octane timing map": (23, 22),
+    "launch high octane timing map": (23, 22),
+    "high octane fuel map": (16, 21),
+    "low octane fuel map": (16, 21),
+    "launch high octane fuel map": (16, 21),
+}
+
+TABLE_SIZE_PATTERNS: list[tuple[re.Pattern[str], tuple[int, int]]] = [
+    (re.compile(r"alternate #\d+ high octane timing map", re.IGNORECASE), (23, 22)),
+    (re.compile(r"alternate #\d+ high octane fuel map", re.IGNORECASE), (16, 21)),
+    (re.compile(r"timing map", re.IGNORECASE), (23, 22)),
+    (re.compile(r"fuel map", re.IGNORECASE), (16, 21)),
+]
+
 
 @dataclass
 class TableDef:
@@ -482,6 +527,22 @@ def _detect_log_columns(fields: list[str] | None) -> dict[str, str | None]:
     }
 
 
+def _missing_log_columns(columns: dict[str, str | None], required: Iterable[str]) -> list[str]:
+    return [key for key in required if not columns.get(key)]
+
+
+def _infer_table_size(table_name: str | None) -> tuple[int | None, int | None]:
+    if not table_name:
+        return None, None
+    key = table_name.strip().lower()
+    if key in TABLE_SIZE_OVERRIDES:
+        return TABLE_SIZE_OVERRIDES[key]
+    for pattern, size in TABLE_SIZE_PATTERNS:
+        if pattern.search(table_name):
+            return size
+    return None, None
+
+
 def _safe_float(value: str | None) -> float | None:
     if value is None:
         return None
@@ -522,11 +583,19 @@ def _resolve_table_meta(table_def: TableDef, rows: int | None, cols: int | None,
     rows = rows or table_def.rows
     cols = cols or table_def.cols
     if rows is None or cols is None:
+        inferred_rows, inferred_cols = _infer_table_size(table_def.name)
+        if rows is None:
+            rows = inferred_rows
+        if cols is None:
+            cols = inferred_cols
+    if rows is None or cols is None:
         table_type = (table_def.data_type or "").lower()
-        if table_type in ("1d", "2d", "3d", "table") and rows is None and cols is None:
+        if table_type in ("1d", "2d") and rows is None and cols is None:
             rows, cols = 1, 1
         else:
-            raise ValueError("Row/column size not found in XML. Provide rows/cols manually.")
+            raise ValueError(
+                f"Row/column size not found in XML for '{table_def.name}'. Provide rows/cols manually."
+            )
 
     data_type = data_type or table_def.data_type
     if data_type and data_type.lower() in ("1d", "2d", "3d", "table"):
@@ -659,6 +728,8 @@ def _read_table_from_def(
             "error": str(exc),
             "matched_table": table_def.name,
             "source_xml": table_def.source_xml,
+            "rows": rows or table_def.rows,
+            "cols": cols or table_def.cols,
         }
 
     fmt, size = _dtype_format(data_type, endian)
@@ -719,6 +790,17 @@ def _read_table_from_def(
         "source_xml": table_def.source_xml,
         "data": table,
     }
+
+
+def _normalize_table_result(result: dict) -> dict:
+    result.setdefault("axis_x", None)
+    result.setdefault("axis_y", None)
+    result.setdefault("rows", None)
+    result.setdefault("cols", None)
+    result.setdefault("units", None)
+    result.setdefault("scaling_name", None)
+    result.setdefault("source_xml", None)
+    return result
 
 
 def _read_scalar_from_def(
@@ -844,6 +926,75 @@ def _write_table_from_def(
     }
 
 
+def _preview_write_table_from_def(
+    rom_filename: str,
+    table_def: TableDef,
+    data: list[list[float]],
+    max_delta: float | None,
+    use_default_max_delta: bool,
+) -> dict:
+    if not _validate_allowlist(table_def.name):
+        return {"error": f"Table '{table_def.name}' is not in allowlist."}
+
+    rom_path = os.path.join(ROM_PATH, rom_filename)
+    if not os.path.isfile(rom_path):
+        return {"error": f"ROM file not found: {rom_path}"}
+
+    try:
+        rows, cols, data_type, endian, resolved_scaling = _resolve_table_meta(
+            table_def, None, None, None, "big"
+        )
+    except ValueError as exc:
+        return {"error": str(exc), "matched_table": table_def.name}
+
+    if len(data) != rows or any(len(row) != cols for row in data):
+        return {"error": "Data shape does not match table dimensions.", "rows": rows, "cols": cols}
+
+    flat_values = _flatten_table(data, table_def.swapxy)
+
+    if max_delta is None and use_default_max_delta:
+        max_delta = _default_max_delta(table_def.name)
+
+    current = _read_table_from_def(rom_filename, table_def, None, None, None, "big", True)
+    if "data" not in current:
+        return {"error": "Unable to read current table for delta check.", "current": current}
+
+    current_flat = _flatten_table(current["data"], table_def.swapxy)
+    deltas = [float(new) - float(old) for old, new in zip(current_flat, flat_values)]
+    changed_indices = [idx for idx, delta in enumerate(deltas) if delta != 0]
+    max_abs_delta = max((abs(delta) for delta in deltas), default=0.0)
+    blocked = False
+    if max_delta is not None:
+        blocked = any(abs(delta) > max_delta for delta in deltas)
+
+    sample_deltas = []
+    for idx in changed_indices[:10]:
+        sample_deltas.append(
+            {
+                "index": idx,
+                "old": current_flat[idx],
+                "new": flat_values[idx],
+                "delta": deltas[idx],
+            }
+        )
+
+    return {
+        "rom_filename": rom_filename,
+        "table_name": table_def.name,
+        "rows": rows,
+        "cols": cols,
+        "data_type": data_type,
+        "endian": endian,
+        "scaling": resolved_scaling,
+        "swapxy": table_def.swapxy,
+        "applied_max_delta": max_delta,
+        "diff_cells": len(changed_indices),
+        "max_abs_delta": max_abs_delta,
+        "blocked_by_max_delta": blocked,
+        "sample_deltas": sample_deltas,
+    }
+
+
 @mcp.tool()
 def list_tables(contains: str = "", limit: int = 50) -> list[str]:
     """Lists table names that match a substring (case-insensitive)."""
@@ -886,6 +1037,20 @@ def set_allowlist_profile(profile: str | None) -> dict:
 
 
 @mcp.tool()
+def get_current_context() -> dict:
+    """Returns current server configuration and allowlist context."""
+    return {
+        "rom_path": ROM_PATH,
+        "output_rom_path": OUTPUT_ROM_PATH,
+        "log_path": LOG_PATH,
+        "xml_paths": XML_PATHS,
+        "allowlist_profile": ACTIVE_ALLOWLIST_PROFILE,
+        "allowlist": _get_allowlist(),
+        "require_backup": REQUIRE_BACKUP,
+    }
+
+
+@mcp.tool()
 def list_tables_for_rom(rom_filename: str, contains: str = "", limit: int = 50, pretty: bool = True) -> list:
     """Lists table names for a ROM, following the XML include chain."""
     contains = contains.lower().strip()
@@ -913,6 +1078,49 @@ def list_tables_for_rom(rom_filename: str, contains: str = "", limit: int = 50, 
             "source_xml": td.source_xml,
         }
         for td in matches
+    ]
+
+
+@mcp.tool()
+def list_common_tables_for_rom(rom_filename: str, profile: str = "launch", limit: int = 50, pretty: bool = True) -> list:
+    """Lists common tables for a ROM based on a profile (launch/boost/fuel/timing/mivec/rev)."""
+    profile_key = profile.strip().lower()
+    queries = COMMON_TABLE_QUERIES.get(profile_key)
+    if not queries:
+        return {"error": f"Unknown profile: {profile}", "profiles": list(COMMON_TABLE_QUERIES.keys())}
+
+    table_defs: list[TableDef] = []
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+    for xml_path in chain:
+        table_defs.extend(_parse_table_defs_for_xml(xml_path))
+
+    matches: list[TableDef] = []
+    for query in queries:
+        matches.extend([td for td in table_defs if query.lower() in td.name.lower()])
+
+    unique: dict[str, TableDef] = {}
+    for td in matches:
+        key = td.name.lower()
+        if key not in unique:
+            unique[key] = td
+
+    results = list(unique.values())[:limit]
+    if pretty:
+        return _format_table_rows(results)
+    return [
+        {
+            "name": td.name,
+            "address": f"0x{td.address:X}",
+            "rows": td.rows,
+            "cols": td.cols,
+            "data_type": td.data_type,
+            "scaling": td.scaling,
+            "swapxy": td.swapxy,
+            "source_xml": td.source_xml,
+        }
+        for td in results
     ]
 
 
@@ -974,6 +1182,73 @@ def get_definition_chain(rom_filename: str) -> list[dict]:
 
 
 @mcp.tool()
+def refresh_xml_cache() -> dict:
+    """Clears cached XML/scaling data so changes are picked up without restart."""
+    _load_xml_root.cache_clear()
+    _build_xmlid_map_cached.cache_clear()
+    _parse_scaling_defs_cached.cache_clear()
+    return {"status": "ok"}
+
+
+@mcp.tool()
+def find_table(rom_filename: str, table_name: str) -> dict:
+    """Finds a table definition with axis metadata using the ROM's XML chain."""
+    error = _validate_table_name(table_name)
+    if error:
+        return {"error": error}
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    table_elem_entry = _find_table_elem_in_chain(chain, table_name)
+    if table_elem_entry is None:
+        table_defs: list[TableDef] = []
+        for xml_path in chain:
+            table_defs.extend(_parse_table_defs_for_xml(xml_path))
+        candidates = _match_tables_in_defs(table_name, table_defs)
+        return {
+            "error": f"No tables matched '{table_name}'.",
+            "candidates": [td.name for td in candidates],
+        }
+
+    table_elem, xml_path = table_elem_entry
+    table_def = _tabledef_from_elem(table_elem, xml_path)
+    if table_def is None:
+        return {"error": f"No tables matched '{table_name}'."}
+
+    axis_defs = []
+    for child in table_elem:
+        axis_type = (child.attrib.get("type") or "").lower()
+        tag = child.tag.lower()
+        if tag not in ("table", "xaxis", "yaxis", "axis"):
+            continue
+        axis_defs.append(
+            {
+                "name": child.attrib.get("name"),
+                "type": axis_type or tag,
+                "address": child.attrib.get("address"),
+                "elements": _find_attr_int(child, ["elements", "size", "count", "cols", "rows"]),
+                "scaling": child.attrib.get("scaling"),
+            }
+        )
+
+    inferred_rows, inferred_cols = _infer_table_size(table_def.name)
+    return {
+        "table": {
+            "name": table_def.name,
+            "address": f"0x{table_def.address:X}",
+            "rows": table_def.rows or inferred_rows,
+            "cols": table_def.cols or inferred_cols,
+            "data_type": table_def.data_type,
+            "scaling": table_def.scaling,
+            "swapxy": table_def.swapxy,
+            "source_xml": table_def.source_xml,
+        },
+        "axes": axis_defs,
+    }
+
+
+@mcp.tool()
 def read_table(
     rom_filename: str,
     table_name: str,
@@ -990,7 +1265,8 @@ def read_table(
     matches = _match_tables(table_name)
     if not matches:
         return {"error": f"No tables matched '{table_name}'."}
-    return _read_table_from_def(rom_filename, matches[0], rows, cols, data_type, endian, apply_scaling)
+    result = _read_table_from_def(rom_filename, matches[0], rows, cols, data_type, endian, apply_scaling)
+    return _normalize_table_result(result)
 
 
 @mcp.tool()
@@ -1019,7 +1295,8 @@ def read_table_for_rom(
     if not matches:
         return {"error": f"No tables matched '{table_name}'."}
 
-    return _read_table_from_def(rom_filename, matches[0], rows, cols, data_type, endian, apply_scaling)
+    result = _read_table_from_def(rom_filename, matches[0], rows, cols, data_type, endian, apply_scaling)
+    return _normalize_table_result(result)
 
 
 def _read_axis_values(rom_filename: str, axis_def: TableDef, axis_type: str, apply_scaling: bool) -> dict:
@@ -1061,6 +1338,30 @@ def read_table_with_axes_for_rom(
     if table_def is None:
         return {"error": f"No tables matched '{table_name}'."}
 
+    inferred_rows, inferred_cols = _infer_table_size(table_def.name)
+    if table_def.rows is None:
+        table_def = TableDef(
+            name=table_def.name,
+            address=table_def.address,
+            rows=inferred_rows,
+            cols=table_def.cols,
+            data_type=table_def.data_type,
+            scaling=table_def.scaling,
+            swapxy=table_def.swapxy,
+            source_xml=table_def.source_xml,
+        )
+    if table_def.cols is None:
+        table_def = TableDef(
+            name=table_def.name,
+            address=table_def.address,
+            rows=table_def.rows,
+            cols=inferred_cols,
+            data_type=table_def.data_type,
+            scaling=table_def.scaling,
+            swapxy=table_def.swapxy,
+            source_xml=table_def.source_xml,
+        )
+
     axis_x: dict | None = None
     axis_y: dict | None = None
     for child in table_elem:
@@ -1084,6 +1385,7 @@ def read_table_with_axes_for_rom(
         axis_x, axis_y = axis_y, axis_x
 
     table = _read_table_from_def(rom_filename, table_def, None, None, None, "big", apply_scaling)
+    table = _normalize_table_result(table)
     return {
         "table": table,
         "x_axis": axis_x,
@@ -1368,6 +1670,8 @@ def analyze_launch_log(
         reader = csv.DictReader(log_file)
         fields = reader.fieldnames or []
         columns = _detect_log_columns(fields)
+        missing = _missing_log_columns(columns, ["rpm", "tps", "speed", "load", "time"])
+        missing = _missing_log_columns(columns, ["rpm", "tps", "speed", "boost", "afr", "timing", "knock", "load", "time"])
 
         for idx, row in enumerate(reader):
             if idx >= max_rows:
@@ -1429,6 +1733,7 @@ def analyze_launch_log(
                 "rpm_max": rpm_max,
             },
             "detected_columns": columns,
+            "missing_columns": missing,
         }
 
     summary = {
@@ -1463,6 +1768,7 @@ def analyze_launch_log(
             "rpm_max": rpm_max,
         },
         "detected_columns": columns,
+        "missing_columns": missing,
         "summary": summary,
         "samples": pretty_samples,
     }
@@ -1559,8 +1865,9 @@ def extract_launch_window(
     rpm_min: float = 2500.0,
     rpm_max: float = 5000.0,
     max_rows: int = 200000,
+    return_series: bool = True,
 ) -> dict:
-    """Extracts launch-window rows from a log file and writes a filtered CSV."""
+    """Extracts launch-window rows and returns structured series data."""
     error = _validate_log_filters(min_tps, max_speed, rpm_min, rpm_max, max_rows)
     if error:
         return {"error": error}
@@ -1583,8 +1890,23 @@ def extract_launch_window(
         reader = csv.DictReader(log_file)
         fields = reader.fieldnames or []
         columns = _detect_log_columns(fields)
+        missing = _missing_log_columns(columns, ["rpm", "tps", "speed", "boost", "afr", "timing", "knock", "load", "time"])
         if not fields:
             return {"error": "No headers found in log file."}
+
+        series: dict[str, list[float | None]] = {
+            "time": [],
+            "rpm": [],
+            "tps": [],
+            "speed": [],
+            "boost": [],
+            "afr": [],
+            "timing": [],
+            "knock": [],
+            "ipw": [],
+            "idc": [],
+            "load": [],
+        }
 
         with open(output_path, "w", newline="", encoding="utf-8") as out_file:
             writer = csv.DictWriter(out_file, fieldnames=fields)
@@ -1602,6 +1924,18 @@ def extract_launch_window(
                     continue
                 writer.writerow(row)
                 rows_written += 1
+                if return_series:
+                    series["rpm"].append(rpm)
+                    series["tps"].append(tps)
+                    series["speed"].append(speed)
+                    series["boost"].append(_safe_float(row.get(columns.get("boost"))) if columns.get("boost") else None)
+                    series["afr"].append(_safe_float(row.get(columns.get("afr"))) if columns.get("afr") else None)
+                    series["timing"].append(_safe_float(row.get(columns.get("timing"))) if columns.get("timing") else None)
+                    series["knock"].append(_safe_float(row.get(columns.get("knock"))) if columns.get("knock") else None)
+                    series["ipw"].append(_safe_float(row.get(columns.get("ipw"))) if columns.get("ipw") else None)
+                    series["idc"].append(_safe_float(row.get(columns.get("idc"))) if columns.get("idc") else None)
+                    series["load"].append(_safe_float(row.get(columns.get("load"))) if columns.get("load") else None)
+                    series["time"].append(_safe_float(row.get(columns.get("time"))) if columns.get("time") else None)
 
     return {
         "filename": filename,
@@ -1613,6 +1947,9 @@ def extract_launch_window(
             "rpm_min": rpm_min,
             "rpm_max": rpm_max,
         },
+        "detected_columns": columns,
+        "missing_columns": missing,
+        "series": series if return_series else None,
     }
 
 
@@ -1734,6 +2071,8 @@ def map_log_to_table(
             "rpm_min": rpm_min,
             "rpm_max": rpm_max,
         },
+        "detected_columns": columns,
+        "missing_columns": missing,
         "top_cells": pretty,
         "total_cells": len(counts),
     }
@@ -1879,6 +2218,39 @@ def write_table_for_rom(
 
 
 @mcp.tool()
+def preview_write_table_for_rom(
+    rom_filename: str,
+    table_name: str,
+    data: list[list[float]],
+    max_delta: float | None = None,
+    use_default_max_delta: bool = True,
+) -> dict:
+    """Previews a table write and reports deltas without writing."""
+    error = _validate_table_name(table_name)
+    if error:
+        return {"error": error}
+    chain = _resolve_rom_chain(rom_filename)
+    if not chain:
+        return {"error": "Unable to resolve ROM definition chain."}
+
+    table_defs: list[TableDef] = []
+    for xml_path in chain:
+        table_defs.extend(_parse_table_defs_for_xml(xml_path))
+
+    matches = _match_tables_in_defs(table_name, table_defs)
+    if not matches:
+        return {"error": f"No tables matched '{table_name}'."}
+
+    return _preview_write_table_from_def(
+        rom_filename,
+        matches[0],
+        data,
+        max_delta,
+        use_default_max_delta,
+    )
+
+
+@mcp.tool()
 def write_cell_for_rom(
     rom_filename: str,
     table_name: str,
@@ -1914,6 +2286,36 @@ def write_cell_for_rom(
         max_delta=max_delta,
         use_default_max_delta=use_default_max_delta,
         write_metadata=write_metadata,
+    )
+
+
+@mcp.tool()
+def preview_write_cell_for_rom(
+    rom_filename: str,
+    table_name: str,
+    row: int,
+    col: int,
+    value: float,
+    max_delta: float | None = None,
+    use_default_max_delta: bool = True,
+) -> dict:
+    """Previews a single-cell write without writing."""
+    error = _validate_table_name(table_name)
+    if error:
+        return {"error": error}
+    current = read_table_for_rom(rom_filename, table_name)
+    if "data" not in current:
+        return current
+    data = current["data"]
+    if row < 0 or col < 0 or row >= len(data) or col >= len(data[0]):
+        return {"error": "Cell index out of bounds."}
+    data[row][col] = value
+    return preview_write_table_for_rom(
+        rom_filename,
+        table_name,
+        data,
+        max_delta=max_delta,
+        use_default_max_delta=use_default_max_delta,
     )
 
 
